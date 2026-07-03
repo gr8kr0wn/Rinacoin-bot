@@ -1,0 +1,11 @@
+python-telegram-bot[job-queue]==22.8
+fastapi==0.139.0
+uvicorn==0.49.0
+sqlalchemy[asyncio]==2.0.51
+asyncpg==0.31.0
+alembic==1.18.5
+pydantic-settings==2.14.2
+apscheduler==3.11.3
+loguru==0.7.3
+groq==1.5.0
+aiohttp==3.14.1
