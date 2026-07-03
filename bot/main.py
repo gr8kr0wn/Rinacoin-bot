@@ -20,7 +20,7 @@ async def lifespan(_app: FastAPI):
         tg_app = create_application()
         await tg_app.initialize()
         if settings.node_env == "production":
-            webhook_url = f"https://{settings.node_env}.railway.app/webhook"
+            webhook_url = f"{settings.webhook_base_url}/webhook" if settings.webhook_base_url else ""
             await tg_app.bot.set_webhook(webhook_url, secret_token=settings.telegram_webhook_secret)
         else:
             await tg_app.start()

@@ -199,9 +199,9 @@ def test_stage_egg_below_1k():
     assert compute_stage(999) == "egg"
 
 
-def test_stage_hatchling_1k_to_10k():
-    assert compute_stage(1_000) == "hatchling"
-    assert compute_stage(9_999) == "hatchling"
+def test_stage_juvenile_500_to_2k():
+    assert compute_stage(1_000) == "juvenile"
+    assert compute_stage(9_999) == "adult"
 
 
 def test_stage_juvenile_10k_to_50k():
@@ -315,7 +315,7 @@ async def test_on_event_first_time_no_state(engine):
 async def test_on_event_excited_mood(engine):
     now = datetime.now(timezone.utc)
     existing = _make_mock_state(
-        mood="happy", stage="hatchling", energy=70, mood_score=65,
+        mood="happy", stage="juvenile", energy=70, mood_score=65,
         last_interacted_at=now - timedelta(minutes=5),
         last_mood_change_at=now - timedelta(hours=2),
         updated_at=now - timedelta(minutes=10),
@@ -327,6 +327,6 @@ async def test_on_event_excited_mood(engine):
                 result = await engine.on_event(-100, PetTriggerEvent(type="points_awarded"))
 
     assert result.mood == "excited"
-    assert result.stage == "hatchling"
+    assert result.stage == "adult"
     assert result.energy == 72
     assert result.mood_score == 66

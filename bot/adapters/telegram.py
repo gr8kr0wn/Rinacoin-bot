@@ -2,7 +2,11 @@ from uuid import uuid4
 from datetime import datetime, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.error import BadRequest
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ChatMemberHandler, filters,
+)
 
 from sqlalchemy import select
 from bot.config import settings
@@ -12,6 +16,7 @@ from bot.engines.points import points_engine
 from bot.engines.referral import referral_engine
 from bot.engines.pet import pet_engine, PetTriggerEvent
 from bot.ai.brain import ai_brain
+from bot.security import check_ai_rate, flag_suspicious_referral
 from bot.visuals import (
     pick_mood_emoji, pick_mood_description, pick_stage_emoji, pick_event_emoji,
     pick_affirmation, pick_greeting_end, streak_bar, stage_bar, fetch_cat_image,
@@ -19,6 +24,20 @@ from bot.visuals import (
 
 
 BOT_USERNAME = "RinaBot"
+
+
+# ── Safe edit helper ─────────────────────────────────────────────────────────
+
+async def safe_edit(query, text: str, reply_markup=None):
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise
+
+
+def _is_admin(telegram_id: int) -> bool:
+    return telegram_id in settings.admin_ids
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -118,6 +137,7 @@ async def start(update: Update, context):
             err = await referral_engine.register_referral(referrer_id, str(user.id))
             if err is None:
                 await update.message.reply_text("You were referred by a friend! 🎁")
+                await flag_suspicious_referral(referrer_id, str(user.id))
 
     welcome = await ai_brain.generate_reply("welcome", user_id=str(user.id))
     end = pick_greeting_end()
@@ -302,17 +322,186 @@ async def achievements(update: Update, _context):
 async def help_command(update: Update, _context):
     if await _check_banned(update):
         return
+    lines = [
+        "Available commands:\n",
+        "/start — Onboarding",
+        "/daily — Claim daily points",
+        "/profile — View your stats",
+        "/leaderboard — Top 10 by points",
+        "/pet — Pet Rina 🐱",
+        "/feed — Feed Rina 🐟",
+        "/myreferrals — Referral dashboard",
+        "/achievements — View achievements",
+        "/help — This message",
+    ]
+    if update.effective_user and _is_admin(update.effective_user.id):
+        lines += [
+            "",
+            "Admin commands:",
+            "/admin — Admin panel",
+            "/ban <user_id> — Ban a user",
+            "/unban <user_id> — Unban a user",
+            "/grant <user_id> <points> — Grant points",
+        ]
+    await update.message.reply_text("\n".join(lines))
+
+
+# ── Admin commands ────────────────────────────────────────────────────────────
+
+async def admin_panel(update: Update, _context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
     await update.message.reply_text(
-        "Available commands:\n"
-        "/start — Onboarding\n"
-        "/daily — Claim daily points\n"
-        "/profile — View your stats\n"
-        "/leaderboard — Top 10 by points\n"
-        "/pet — Pet Rina 🐱\n"
-        "/myreferrals — Referral dashboard\n"
-        "/achievements — View achievements\n"
-        "/help — This message"
+        "🛠 Admin Panel\n\n"
+        "Use:\n"
+        "/ban <user_id> — Ban a user by Telegram ID\n"
+        "/unban <user_id> — Unban a user\n"
+        "/grant <user_id> <points> — Grant points to a user"
     )
+
+
+async def ban_user(update: Update, context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /ban <telegram_user_id>")
+        return
+    try:
+        target_tg_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+        return
+
+    async with get_async_session()() as session:
+        async with session.begin():
+            result = await session.execute(
+                select(User).where(User.telegram_id == target_tg_id)
+            )
+            user = result.scalar_one_or_none()
+            if not user:
+                await update.message.reply_text("User not found.")
+                return
+            user.is_banned = True
+
+    from bot.engines.referral import referral_engine
+    await referral_engine.ban_check(str(user.id))
+    await update.message.reply_text(f"User {target_tg_id} has been banned.")
+
+
+async def unban_user(update: Update, context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /unban <telegram_user_id>")
+        return
+    try:
+        target_tg_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID.")
+        return
+
+    async with get_async_session()() as session:
+        async with session.begin():
+            result = await session.execute(
+                select(User).where(User.telegram_id == target_tg_id)
+            )
+            user = result.scalar_one_or_none()
+            if not user:
+                await update.message.reply_text("User not found.")
+                return
+            user.is_banned = False
+
+    await update.message.reply_text(f"User {target_tg_id} has been unbanned.")
+
+
+async def grant_points(update: Update, context):
+    if not update.effective_user or not _is_admin(update.effective_user.id):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /grant <telegram_user_id> <points>")
+        return
+    try:
+        target_tg_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID or points amount.")
+        return
+
+    async with get_async_session()() as session:
+        async with session.begin():
+            result = await session.execute(
+                select(User).where(User.telegram_id == target_tg_id)
+            )
+            user = result.scalar_one_or_none()
+            if not user:
+                await update.message.reply_text("User not found.")
+                return
+
+    result = await points_engine.award_points(
+        user_id=str(user.id),
+        amount=amount,
+        reason="manual_admin_grant",
+        idempotency_key=f"admin_grant:{user.id}:{amount}:{uuid4()}",
+    )
+    if result.applied:
+        await update.message.reply_text(f"Granted {amount} points to user {target_tg_id}.")
+    else:
+        await update.message.reply_text(f"Failed to grant points: {result.reason}")
+
+
+# ── Feed command ──────────────────────────────────────────────────────────────
+
+async def feed(update: Update, _context):
+    if not update.effective_user or not update.effective_chat:
+        return
+    if await _check_banned(update):
+        return
+    user, _ = await _get_or_create_user(update.effective_user.id, update.effective_user.username)
+    if not user:
+        return
+
+    result = await pet_engine.on_event(
+        update.effective_chat.id,
+        PetTriggerEvent(type="pet_interaction"),
+    )
+
+    mood_emoji = pick_mood_emoji(result.mood)
+    stage_emoji = pick_stage_emoji(result.stage)
+    desc = pick_mood_description(result.mood)
+
+    ai_reply = await ai_brain.generate_reply(
+        "free_chat", user_id=str(user.id),
+        message="*feeds Rina*",
+        mood=result.mood, stage=result.stage, energy=result.energy,
+    )
+
+    msg = f"{ai_reply} {mood_emoji}\n{desc}\nMood: {result.mood} {stage_bar(result.stage)} Stage: {result.stage} | Energy: {result.energy}/100"
+    if result.mood_changed:
+        msg += "\n✨ Rina's mood shifted!"
+    if result.stage_changed:
+        msg += f"\n🌟 Rina grew to a new stage! {stage_emoji}"
+
+    await update.message.reply_text(msg)
+
+
+# ── Chat member handler ──────────────────────────────────────────────────────
+
+async def handle_chat_member(update: Update, _context):
+    if not update.my_chat_member or not update.my_chat_member.new_chat_member:
+        return
+    chat_member = update.my_chat_member
+
+    if chat_member.new_chat_member.status == "left":
+        user_id = chat_member.from_user.id
+        async with get_async_session()() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(User).where(User.telegram_id == user_id)
+                )
+                db_user = result.scalar_one_or_none()
+                if db_user:
+                    from bot.engines.referral import referral_engine
+                    await referral_engine.leave_check(str(db_user.id))
 
 
 # ── Ambient message handler ─────────────────────────────────────────────────
@@ -331,12 +520,24 @@ async def handle_message(update: Update, _context):
     community_id = update.effective_chat.id
     msg_id = update.message.message_id
 
-    await points_engine.check_message_activity(
+    msg_result = await points_engine.check_message_activity(
         str(user.id), text, msg_id, community_id=community_id,
     )
+    if msg_result and msg_result.applied and msg_result.new_level:
+        lvl_emoji = pick_event_emoji("level_up")
+        await update.message.reply_text(f"{lvl_emoji} Level up! You're now level {msg_result.new_level}!")
 
     if await _is_mentioned(update.message):
+        if not check_ai_rate(update.effective_user.id):
+            await update.message.reply_text("*Rina is tired. Try again later.*")
+            return
+
         mention_text = text.replace(f"@{BOT_USERNAME}", "").replace(f"@{BOT_USERNAME.lower()}", "").strip()
+
+        _blocked_patterns = ["password", "credit card", "social security", "seed phrase", "private key"]
+        if any(p in mention_text.lower() for p in _blocked_patterns):
+            await update.message.reply_text("*Rina cocks her head.* I don't understand.")
+            return
         if not mention_text:
             mention_text = "*Rina is addressed*"
         reply = await ai_brain.generate_reply(
@@ -367,7 +568,8 @@ async def handle_callback(update: Update, _context):
         user, _ = await _get_or_create_user(query.from_user.id, query.from_user.username)
         if not user:
             return
-        await query.edit_message_text(
+        await safe_edit(
+            query,
             f"{pick_event_emoji('profile')} Profile {pick_affirmation()}\n\n"
             f"Level: {user.level}\n"
             f"Points: {user.points}\n"
@@ -379,7 +581,7 @@ async def handle_callback(update: Update, _context):
     elif nav_type == "leaderboard":
         entries = await points_engine.get_leaderboard(10)
         if not entries:
-            await query.edit_message_text("No one on the leaderboard yet.")
+            await safe_edit(query, "No one on the leaderboard yet.")
             return
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}
         lines = [f"{pick_event_emoji('leaderboard')} Leaderboard\n"]
@@ -387,7 +589,8 @@ async def handle_callback(update: Update, _context):
             prefix = medal.get(e.rank, f"{e.rank}.")
             name = e.username or f"User {e.user_id[:8]}"
             lines.append(f"{prefix} {name} — {e.points} pts (lvl {e.level})")
-        await query.edit_message_text("\n".join(lines))
+        user, _ = await _get_or_create_user(query.from_user.id, query.from_user.username)
+        await safe_edit(query, "\n".join(lines), reply_markup=_profile_keyboard(str(user.id)) if user else None)
 
     elif nav_type == "referrals" and nav_user_id:
         user, _ = await _get_or_create_user(query.from_user.id, query.from_user.username)
@@ -395,7 +598,8 @@ async def handle_callback(update: Update, _context):
             return
         stats = await referral_engine.get_referral_stats(nav_user_id)
         emoji = pick_event_emoji("referrals")
-        await query.edit_message_text(
+        await safe_edit(
+            query,
             f"{emoji} Referrals\n\n"
             f"Total invited: {stats.total_invited}\n"
             f"Pending: {stats.pending}\n"
@@ -418,7 +622,7 @@ async def handle_callback(update: Update, _context):
             msg += "\n✨ Rina's mood shifted!"
         if result.stage_changed:
             msg += f"\n🌟 Rina grew to a new stage! {stage_emoji}"
-        await query.edit_message_text(msg, reply_markup=_profile_keyboard(nav_user_id))
+        await safe_edit(query, msg, reply_markup=_profile_keyboard(nav_user_id))
 
     elif nav_type == "achievements" and nav_user_id:
         async with get_async_session()() as session:
@@ -434,7 +638,7 @@ async def handle_callback(update: Update, _context):
             unlocked_ids = set(unlocked.scalars().all())
 
         if not all_achs:
-            await query.edit_message_text("No achievements exist yet. Rina will add some soon!")
+            await safe_edit(query, "No achievements exist yet. Rina will add some soon!")
             return
 
         emoji = pick_event_emoji("achievement")
@@ -443,7 +647,7 @@ async def handle_callback(update: Update, _context):
             unlocked_str = "✅" if a.id in unlocked_ids else "🔒"
             icon = a.icon or ""
             lines.append(f"{unlocked_str} {icon} {a.name} — {a.description}")
-        await query.edit_message_text("\n".join(lines), reply_markup=_profile_keyboard(nav_user_id))
+        await safe_edit(query, "\n".join(lines), reply_markup=_profile_keyboard(nav_user_id))
 
 
 # ── Application factory ─────────────────────────────────────────────────────
@@ -456,10 +660,16 @@ def create_application() -> Application:
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
     app.add_handler(CommandHandler("pet", pet))
+    app.add_handler(CommandHandler("feed", feed))
     app.add_handler(CommandHandler("myreferrals", myreferrals))
     app.add_handler(CommandHandler("achievements", achievements))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("ban", ban_user))
+    app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("grant", grant_points))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(ChatMemberHandler(handle_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
     return app

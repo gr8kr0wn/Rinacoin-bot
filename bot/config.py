@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     groq_model: str = "mixtral-8x7b-32768"
     node_env: str = "development"
     port: int = 3000
+    webhook_base_url: str = ""
     admin_telegram_ids: str = ""
+    cat_api_key: str = ""
 
     @property
     def admin_ids(self) -> list[int]:

@@ -155,7 +155,10 @@ class ReferralEngine:
             )
 
     async def expire_stale_referrals(self) -> int:
+        from bot.engines.points import points_engine
+
         cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
+        retry_cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         async with _get_session_maker()() as session:
             async with session.begin():
                 stale = await session.execute(
@@ -171,6 +174,34 @@ class ReferralEngine:
                     r.status = "rejected"
                     r.rejection_reason = "inactive_30d"
                     session.add(r)
+
+                stuck = await session.execute(
+                    select(Referral).where(
+                        and_(
+                            Referral.status == "qualified",
+                            Referral.qualified_at < retry_cutoff,
+                        )
+                    )
+                )
+                for r in stuck.scalars().all():
+                    ref_user = await session.get(User, r.referred_id)
+                    if ref_user and ref_user.lifetime_points >= QUALIFY_POINTS:
+                        result = await points_engine.award_points(
+                            user_id=str(r.referrer_id),
+                            amount=REFERRAL_REWARD,
+                            reason="referral_bonus",
+                            idempotency_key=f"referral:{r.id}:qualified",
+                            meta={"referred_user_id": str(r.referred_id)},
+                        )
+                        if result.applied:
+                            r.status = "rewarded"
+                            r.rewarded_at = datetime.now(timezone.utc)
+                            session.add(r)
+                    else:
+                        r.status = "rejected"
+                        r.rejection_reason = "inactive_30d"
+                        session.add(r)
+
                 return len(rows)
 
     async def ban_check(self, user_id: str) -> None:

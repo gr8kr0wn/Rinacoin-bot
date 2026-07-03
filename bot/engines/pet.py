@@ -9,7 +9,7 @@ from bot.db.database import get_async_session
 from bot.db.models import PetState as PetStateDB, User
 
 Mood = Literal["hungry", "happy", "sleepy", "playful", "curious", "lonely", "excited", "sad"]
-Stage = Literal["egg", "hatchling", "juvenile", "adult", "elder"]
+Stage = Literal["kitten", "juvenile", "adult", "senior", "elder"]
 
 
 @dataclass
@@ -69,15 +69,15 @@ def resolve_mood(
 
 
 def compute_stage(total_lifetime_points: int) -> Stage:
-    if total_lifetime_points >= 200_000:
-        return "elder"
     if total_lifetime_points >= 50_000:
-        return "adult"
+        return "elder"
     if total_lifetime_points >= 10_000:
+        return "senior"
+    if total_lifetime_points >= 2_000:
+        return "adult"
+    if total_lifetime_points >= 500:
         return "juvenile"
-    if total_lifetime_points >= 1_000:
-        return "hatchling"
-    return "egg"
+    return "kitten"
 
 
 _session_maker: async_sessionmaker | None = None

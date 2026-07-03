@@ -5,8 +5,8 @@ import random
 # ── Stage emojis — literal growth indicators ────────────────────────────────
 
 STAGE_EMOJIS = {
-    "egg": "🥚",
-    "hatchling": "🐾",
+    "kitten": "🐱",
+    "senior": "🐾",
     "juvenile": "🐈",
     "adult": "🐱",
     "elder": "👑",
@@ -99,7 +99,7 @@ def streak_bar(streak: int) -> str:
 
 
 def stage_bar(stage: str) -> str:
-    stages = ["egg", "hatchling", "juvenile", "adult", "elder"]
+    stages = ["kitten", "juvenile", "adult", "senior", "elder"]
     idx = stages.index(stage) if stage in stages else 0
     return "⬜" * idx + "🟩" + "⬜" * (len(stages) - idx - 1)
 
@@ -109,9 +109,16 @@ def stage_bar(stage: str) -> str:
 async def fetch_cat_image() -> str | None:
     try:
         import aiohttp
+        from bot.config import settings
+
+        headers = {}
+        if settings.cat_api_key:
+            headers["x-api-key"] = settings.cat_api_key
+
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 "https://api.thecatapi.com/v1/images/search",
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=3),
             ) as resp:
                 if resp.status != 200:

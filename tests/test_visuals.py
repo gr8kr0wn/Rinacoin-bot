@@ -35,7 +35,7 @@ class TestMoodEmoji:
 class TestStageEmoji:
     def test_known_stages(self):
         assert pick_stage_emoji("egg") == "🥚"
-        assert pick_stage_emoji("hatchling") == "🐾"
+        assert pick_stage_emoji("senior") == "🐾"
         assert pick_stage_emoji("juvenile") == "🐈"
         assert pick_stage_emoji("adult") == "🐱"
         assert pick_stage_emoji("elder") == "👑"

@@ -108,11 +108,68 @@ class PointsEngine:
                 from bot.engines.pet import pet_engine, PetTriggerEvent
                 await pet_engine.on_event(community_id, PetTriggerEvent(type="points_awarded"))
 
+            await self._check_achievements(session, user, reason)
+
             return AwardResult(
                 applied=True,
                 new_points=new_points,
                 new_level=new_level,
             )
+
+    async def _check_achievements(self, session, user, reason: str):
+        from bot.db.models import Achievement, UserAchievement
+
+        existing = await session.execute(
+            select(UserAchievement.achievement_id).where(
+                UserAchievement.user_id == user.id
+            )
+        )
+        unlocked_ids = {row[0] for row in existing.all()}
+
+        all_achs = await session.execute(
+            select(Achievement)
+        )
+        for ach in all_achs.scalars().all():
+            if ach.id in unlocked_ids:
+                continue
+            unlocked = False
+            if ach.code == "first_daily" and reason == "daily_claim":
+                unlocked = True
+            elif ach.code == "streak_7" and getattr(user, "daily_streak", 0) >= 7:
+                unlocked = True
+            elif ach.code == "streak_30" and getattr(user, "daily_streak", 0) >= 30:
+                unlocked = True
+            elif ach.code == "referral_1" or ach.code == "referral_5":
+                from bot.engines.referral import referral_engine
+                stats = await referral_engine.get_referral_stats(str(user.id))
+                count = stats.total_invited
+                if ach.code == "referral_1" and count >= 1:
+                    unlocked = True
+                elif ach.code == "referral_5" and count >= 5:
+                    unlocked = True
+            elif ach.code == "points_100" and user.lifetime_points >= 100:
+                unlocked = True
+            elif ach.code == "points_1000" and user.lifetime_points >= 1000:
+                unlocked = True
+            elif ach.code == "level_5" and user.level >= 5:
+                unlocked = True
+            elif ach.code == "level_10" and user.level >= 10:
+                unlocked = True
+            elif ach.code == "messages_50":
+                count = await session.execute(
+                    select(sa_func.count()).select_from(ActivityLog).where(
+                        ActivityLog.user_id == user.id,
+                        ActivityLog.event_type == "message_activity",
+                    )
+                )
+                if count.scalar() >= 50:
+                    unlocked = True
+
+            if unlocked:
+                session.add(UserAchievement(
+                    user_id=user.id,
+                    achievement_id=ach.id,
+                ))
 
     async def get_balance(self, user_id: str) -> int:
         async with _get_session_maker()() as session:
@@ -168,7 +225,7 @@ class PointsEngine:
                 if already_processed:
                     return AwardResult(applied=False, reason="duplicate")
 
-                await session.execute(
+                result = await session.execute(
                     pg_insert(ActivityLog)
                     .values(
                         user_id=user_id,
@@ -178,7 +235,11 @@ class PointsEngine:
                         metadata_={"streak": new_streak, "bonus": bonus},
                     )
                     .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                    .returning(ActivityLog.id)
                 )
+                inserted_id = result.scalar_one_or_none()
+                if inserted_id is None:
+                    return AwardResult(applied=False, reason="duplicate")
 
                 user.points = (user.points or 0) + total_points
                 lifetime_delta = max(total_points, 0)
@@ -196,6 +257,10 @@ class PointsEngine:
                 from bot.engines.pet import pet_engine, PetTriggerEvent
                 await pet_engine.on_event(community_id, PetTriggerEvent(type="points_awarded"))
 
+            if community_id is not None and last_daily is not None and new_streak == 1:
+                from bot.engines.pet import pet_engine, PetTriggerEvent
+                await pet_engine.on_event(community_id, PetTriggerEvent(type="streak_broken"))
+
             return AwardResult(
                 applied=True,
                 new_points=user.points if hasattr(user, "points") else 0,
@@ -205,7 +270,18 @@ class PointsEngine:
             )
 
     async def snapshot_weekly(self):
-        return {"ok": True, "note": "placeholder — weekly snapshot not yet implemented"}
+        async with _get_session_maker()() as session:
+            async with session.begin():
+                from bot.db.models import ActivityLog
+                week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+                result = await session.execute(
+                    select(sa_func.count(), sa_func.coalesce(sa_func.sum(ActivityLog.points_delta), 0))
+                    .where(ActivityLog.created_at >= week_ago)
+                )
+                count, total = result.one()
+                from loguru import logger
+                logger.info(f"Weekly snapshot: {count} events, {total} total points")
+                return {"ok": True, "events": count, "total_points": total}
 
     async def check_message_activity(
         self,
@@ -234,7 +310,7 @@ class PointsEngine:
                         )
                     )
                 )
-                if daily_count.scalar() or 0 >= DAILY_MESSAGE_CAP:
+                if (daily_count.scalar() or 0) >= DAILY_MESSAGE_CAP:
                     return AwardResult(applied=False, reason="daily_cap_reached")
 
                 recent = await session.execute(

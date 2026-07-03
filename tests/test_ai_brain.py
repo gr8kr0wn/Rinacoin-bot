@@ -32,7 +32,7 @@ def test_pick_template_all_types_produce_output():
         "achievement_unlock", "free_chat", "lonely_ping", "welcome",
     ]:
         text = pick_template(pt, streak=1, points=10, old_mood="sad",
-                             new_mood="happy", stage="hatchling",
+                             new_mood="happy", stage="juvenile",
                              referrer_name="A", referred_name="B",
                              achievement_name="Test", message="Hi",
                              hours=6)
